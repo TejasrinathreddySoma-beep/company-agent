@@ -3,9 +3,13 @@ from contextlib import contextmanager
 import socket
 import faiss
 import ollama
+import json
+import db
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from sentence_transformers import SentenceTransformer
+from tool import create_gmail_draft
+import datetime as dt
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
@@ -190,9 +194,68 @@ async def _ask_async(question, history):
                     return "\n\n".join(direct)
     return ""
 
+def write_email(question):
+    m = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", question)
+    to = m.group(0) if m else ""
+    out = ollama.chat(
+        model=LLM, format="json", keep_alive="30m",
+        options={"temperature": 0.4, "num_predict": 300},
+        messages=[{"role": "user", "content":
+            'Write a short, polite, professional email for this request. '
+            'Return JSON with only the keys "subject" and "body". '
+            'End the body with "Best regards," and no placeholders. Request: ' + question}])
+    data = json.loads(out["message"]["content"])
+    text = f"**To:** {to or '(add recipient)'}\n**Subject:** {data['subject']}\n\n{data['body']}"
+    if to and online():
+        try:
+            create_gmail_draft(to, data["subject"], data["body"])
+            db.log_draft(to, data["subject"])
+            text += "\n\n✅ Saved as a draft in your Gmail. Review it and send it from Drafts."
+        except Exception as e:
+            text += f"\n\n(Couldn't create the draft: {e})"
+    return text
+PENDING_EVENT = {"data": None}
+
+def parse_event(question):
+    now = dt.datetime.now().astimezone()
+    out = ollama.chat(
+        model=LLM, format="json", keep_alive="30m",
+        options={"temperature": 0.1, "num_predict": 200},
+        messages=[{"role": "user", "content":
+            f"Today is {now:%A, %Y-%m-%d}, current time {now:%H:%M}. "
+            "Extract a calendar event from the request. Return JSON with keys: "
+            '"title" (short string), "start" (local time as YYYY-MM-DDTHH:MM), '
+            '"duration_minutes" (integer, default 60). '
+            "Resolve words like tomorrow, next Monday or Friday relative to today. "
+            "If no time is given, use 09:00. Request: " + question}])
+    d = json.loads(out["message"]["content"])
+    start = dt.datetime.fromisoformat(d["start"])
+    return {"title": str(d["title"]).strip() or "New event",
+            "start": start.isoformat(timespec="minutes"),
+            "minutes": int(d.get("duration_minutes") or 60)}
+
+def propose_event(question):
+    try:
+        ev = parse_event(question)
+    except Exception:
+        PENDING_EVENT["data"] = None
+        return ("I couldn't work out the date and time. Try: "
+                "add Team meeting to my calendar on 30 Oct at 4 PM")
+    PENDING_EVENT["data"] = ev
+    start = dt.datetime.fromisoformat(ev["start"])
+    end = start + dt.timedelta(minutes=ev["minutes"])
+    return (f"I can add this to your calendar:\n\n**{ev['title']}**\n"
+            f"- {start:%A, %d %b %Y}\n- {start:%I:%M %p} to {end:%I:%M %p}\n\n"
+            "Confirm below to add it.")
 # ---------------- routing + entry point ----------------
 def route(q):
     ql = q.lower()
+    if "mail" in ql and any(w in ql for w in ("write", "draft", "compose")):
+        return "write"
+    if re.search(r"\b(add|create|schedule a|book|set up|put|remind me)\b", ql) and (
+            "remind me" in ql or any(w in ql for w in
+                                     ("calendar", "calender", "meeting", "event", "reminder", "appointment"))):
+        return "add_event"
     if any(w in ql for w in ("email", "mail", "inbox", "unread", "gmail")):
         return "tools"
     if any(w in ql for w in ("meeting", "calendar", "calender", "schedule",
@@ -217,9 +280,10 @@ def online(timeout=2.0):
 def ask(question, history):
     TIMINGS.clear()
     LAST_SOURCES.clear()
+    PENDING_EVENT["data"] = None
     t_all = time.perf_counter()
-
-    if route(question) == "docs":
+    kind = route(question)
+    if kind == "docs":
         query = question
         if history and len(question.split()) < 8:      # short follow-up like "its advantages?"
             query = f"{history[-2]['content']} {question}"
@@ -228,6 +292,11 @@ def ask(question, history):
             answer = "I couldn't find that in the company documents."
         else:
             answer = compose(question, material)
+
+    elif kind == "write":
+        answer = write_email(question)         # only if you added it
+    elif kind == "add_event":
+        answer = propose_event(question)
     else:
         if online():
             answer = asyncio.run(_ask_async(question, history))
@@ -240,6 +309,9 @@ def ask(question, history):
 
     TIMINGS.append(f"TOTAL: {time.perf_counter() - t_all:.2f}s")
     print("\n".join(["--- timing ---"] + TIMINGS))
+    db.log_query(question, kind, answer if kind == "docs" else None,
+                 time.perf_counter() - t_all,
+                 [{"source": s["source"], "score": s["score"]} for s in LAST_SOURCES])
     return answer, list(LAST_SOURCES)
 
 if __name__ == "__main__":

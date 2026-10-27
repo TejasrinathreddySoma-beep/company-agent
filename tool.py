@@ -7,13 +7,40 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from concurrent.futures import ThreadPoolExecutor
+import base64
+from email.message import EmailMessage
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE, ".env"))
 TOKEN = os.path.join(BASE, "token.json")
 CREDS = os.path.join(BASE, "credentials.json")
+
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly",
-          "https://www.googleapis.com/auth/calendar.readonly"]
+          "https://www.googleapis.com/auth/calendar.readonly",
+          "https://www.googleapis.com/auth/gmail.compose",
+          "https://www.googleapis.com/auth/calendar.events"]
+
+def create_calendar_event(title: str, start_iso: str, minutes: int = 60) -> str:
+    """Create an event in the primary Google Calendar. Called only after the user confirms."""
+    svc = build("calendar", "v3", credentials=_google_creds())
+    start = dt.datetime.fromisoformat(start_iso).astimezone()   # naive time is treated as local
+    end = start + dt.timedelta(minutes=minutes)
+    ev = svc.events().insert(calendarId="primary", body={
+        "summary": title,
+        "start": {"dateTime": start.isoformat()},
+        "end": {"dateTime": end.isoformat()},
+    }).execute()
+    return ev.get("htmlLink", "")
+
+def create_gmail_draft(to: str, subject: str, body: str) -> str:
+    """Create a Gmail draft. It does NOT send the email."""
+    svc = build("gmail", "v1", credentials=_google_creds())
+    m = EmailMessage()
+    m["To"], m["Subject"] = to, subject
+    m.set_content(body)
+    raw = base64.urlsafe_b64encode(m.as_bytes()).decode()
+    d = svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
+    return f"Draft created (id {d['id']})."
 
 def _google_creds():
     creds = None

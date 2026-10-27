@@ -6,3 +6,7 @@ credentials.json
 token.json
 index.faiss
 chunks.pkl
+docs/*
+notes/*
+!docs/.gitkeep
+!notes/.gitkeep

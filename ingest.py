@@ -38,3 +38,7 @@ index.add(emb)
 faiss.write_index(index, "index.faiss")
 pickle.dump((chunks, meta), open("chunks.pkl", "wb"))
 print(f"Indexed {len(chunks)} chunks from {len(set(m.split(' p.')[0] for m in meta))} files")
+
+from collections import Counter
+import db
+db.upsert_documents(Counter(m.split(" p.")[0] for m in meta))

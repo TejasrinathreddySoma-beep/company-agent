@@ -1,6 +1,16 @@
 import importlib, pathlib, subprocess, sys
 import streamlit as st
 import agent
+import db
+import datetime as dt
+from tool import create_calendar_event
+
+@st.cache_resource
+def _init_db():
+    db.init()
+    return True
+
+_init_db()
 
 BASE = pathlib.Path(__file__).parent
 
@@ -41,6 +51,12 @@ with st.sidebar:
             st.error(r.stderr[-500:])
 
     st.divider()
+    with st.expander("📊 Activity log"):
+        rows = db.recent_queries(10)
+        if rows:
+            st.dataframe(rows, hide_index=True, use_container_width=True)
+        else:
+            st.caption("No data yet, or the database is offline.")
     if st.button("🗑️ Clear chat", use_container_width=True):
         st.session_state.history = []
         st.session_state.shown = []
@@ -78,3 +94,28 @@ if q:
     st.session_state.history += [{"role": "user", "content": q},
                                  {"role": "assistant", "content": answer}]
     st.session_state.shown += [("user", q, []), ("assistant", answer, sources)]
+    st.session_state.pending_event = agent.PENDING_EVENT["data"]
+
+
+ev = st.session_state.get("pending_event")
+if ev:
+    start = dt.datetime.fromisoformat(ev["start"])
+    with st.container(border=True):
+        st.markdown(f"**Add to your calendar?**  \n{ev['title']} · {start:%a %d %b, %I:%M %p} · {ev['minutes']} min")
+        c1, c2 = st.columns(2)
+        if c1.button("✅ Confirm", key="ev_ok", use_container_width=True):
+            try:
+                link = create_calendar_event(ev["title"], ev["start"], ev["minutes"])
+                db.log_event(ev["title"], ev["start"], ev["minutes"], "confirmed", link)
+                msg = f"✅ Added **{ev['title']}** to your calendar." + (f" [Open it]({link})" if link else "")
+            except Exception as e:
+                db.log_event(ev["title"], ev["start"], ev["minutes"], "failed")
+                msg = f"Couldn't add the event: {e}"
+            st.session_state.shown.append(("assistant", msg, []))
+            st.session_state.pending_event = None
+            st.rerun()
+        if c2.button("❌ Cancel", key="ev_no", use_container_width=True):
+            db.log_event(ev["title"], ev["start"], ev["minutes"], "cancelled")
+            st.session_state.shown.append(("assistant", "Okay, I didn't add it.", []))
+            st.session_state.pending_event = None
+            st.rerun()
