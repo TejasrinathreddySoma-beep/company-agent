@@ -5,6 +5,7 @@ A local, privacy-friendly AI assistant that answers questions from your own docu
 ## Features
 
 - **Document Q&A (RAG):** ask questions about PDFs, text, Markdown and Word files. Answers come back in a clean structure (short definition, key points, limitations).
+- **Grounded answers:** a similarity threshold returns "I couldn't find that" instead of guessing when no relevant passage exists.
 - **Sources tab:** answers stay clean, and the supporting passages are in a collapsible *Sources* section.
 - **Gmail:** list recent, unread or filtered emails as a readable table.
 - **Email drafting:** "write a mail to ..." produces the email and saves it as a **Gmail draft**. The app never sends anything itself.
@@ -31,9 +32,21 @@ route()
 PostgreSQL activity log
 ```
 
-1. `ingest.py` reads files from `docs/` and `notes/`, splits them into chunks, embeds them with `all-MiniLM-L6-v2`, stores them in a FAISS index, and records the files in PostgreSQL.
+1. `ingest.py` reads files from `docs/` and `notes/`, splits them into chunks (about 800 characters with 150 overlap), embeds them with `all-MiniLM-L6-v2`, stores them in a FAISS index, and records the files in PostgreSQL.
 2. `agent.py` routes each question to the right path and logs the result.
 3. `app.py` is the Streamlit front end, including the confirmation card for calendar events.
+
+## Measured results
+
+Measured from the project's own PostgreSQL activity log, running Llama 3.1 8B through Ollama on a laptop with an integrated GPU (Intel Core Ultra 5 125H).
+
+| Metric | Result |
+|---|---|
+| Indexed corpus | 9 documents, 1,177 chunks |
+| Document questions (5 queries) | median 16.7 s, mean 20.1 s end to end |
+| Gmail and Calendar questions (2 queries) | about 15.4 s end to end |
+
+This is a small sample (7 queries) and not a formal benchmark. The first query after startup includes model loading, which raises the mean. Most of the time is spent generating the answer with the local 8B model, while retrieval itself is a small fraction. The Timing panel in the app breaks each answer into retrieval, model load, prompt reading and generation speed (tokens per second).
 
 ## Project structure
 
@@ -183,6 +196,13 @@ Environment variable in `.env`: `DATABASE_URL`.
 - The **Timing** expander in the UI shows retrieval time, model load, prompt reading and generation speed (tokens per second) for each question.
 - LLM generation is the slowest step. A smaller model (for example `llama3.2:3b`) is usually the biggest speed-up.
 - The embedding model is loaded from the local cache first, so startup does not depend on internet access.
+
+## Limitations
+
+- Single-user, local application: there is no login, and every user of the machine sees all indexed documents.
+- Routing between documents, Gmail and Calendar uses keyword rules rather than a trained classifier.
+- Answer quality and speed depend on the local 8B model and the laptop's integrated GPU.
+- Relative dates such as "next Friday" are interpreted by the LLM, so the confirmation card shows the resolved date for you to check before anything is created.
 
 ## Security and privacy
 
